@@ -108,7 +108,10 @@ def sales():
     year = datetime.now().year
     month = datetime.now().month
     products = Product.query.all()
+
+    # Existing sales for current month
     existing = {s.product_id: s.quantity for s in Sales.query.filter_by(year=year, month=month).all()}
+
     if request.method == "POST":
         for p in products:
             qty = request.form.get(str(p.id))
@@ -121,12 +124,34 @@ def sales():
         db.session.commit()
         flash("Sales saved.")
         return redirect(url_for("sales"))
-    table = f"<form method='post'><h3>{year} - {month}</h3><table class='table'>"
+
+    # Editable form for current month
+    form_html = f"<form method='post'><h3>{year} - {month}</h3><table class='table'>"
     for p in products:
         val = existing.get(p.id, "")
-        table += f"<tr><td>{p.name}</td><td><input name='{p.id}' value='{val}'></td></tr>"
-    table += "</table><button>Save</button></form>"
-    return render_template_string(BASE, content=table)
+        form_html += f"<tr><td>{p.name}</td><td><input name='{p.id}' value='{val}'></td></tr>"
+    form_html += "</table><button>Save</button></form>"
+
+    # Read-only previous months of the year
+    prev_months = Sales.query.filter(Sales.year == year, Sales.month < month).order_by(Sales.month).all()
+    if prev_months:
+        # Group sales by month
+        month_data = {}
+        for s in prev_months:
+            month_data.setdefault(s.month, {})[s.product_id] = s.quantity
+
+        table_html = "<h3>Previous Months</h3>"
+        for m in sorted(month_data.keys()):
+            table_html += f"<h5>{year} - {m}</h5><table class='table'>"
+            for p in products:
+                qty = month_data[m].get(p.id, "")
+                table_html += f"<tr><td>{p.name}</td><td>{qty}</td></tr>"
+            table_html += "</table>"
+    else:
+        table_html = "<p>No previous month data.</p>"
+
+    return render_template_string(BASE, content=form_html + "<hr>" + table_html)
+
 
 @app.route("/report")
 def report():
