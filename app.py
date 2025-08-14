@@ -24,12 +24,8 @@ class Stock(db.Model):
     product_id = db.Column(db.Integer, db.ForeignKey('product.id'), nullable=False)
     quantity = db.Column(db.Float, nullable=False)
     created_at = db.Column(db.DateTime, default=datetime.utcnow)
-
     product = db.relationship('Product')
-
-    __table_args__ = (
-        db.UniqueConstraint('year','product_id', name='uix_year_product'),
-    )
+    __table_args__ = (db.UniqueConstraint('year','product_id', name='uix_year_product'),)
 
 class Sales(db.Model):
     id = db.Column(db.Integer, primary_key=True)
@@ -38,17 +34,10 @@ class Sales(db.Model):
     product_id = db.Column(db.Integer, db.ForeignKey('product.id'), nullable=False)
     quantity = db.Column(db.Float, nullable=False)
     created_at = db.Column(db.DateTime, default=datetime.utcnow)
-
     product = db.relationship('Product')
-
-    __table_args__ = (
-        db.UniqueConstraint('year','month','product_id', name='uix_year_month_product'),
-    )
+    __table_args__ = (db.UniqueConstraint('year','month','product_id', name='uix_year_month_product'),)
 
 MONTHS = ["Jan","Feb","Mar","Apr","May","Jun","Jul","Aug","Sep","Oct","Nov","Dec"]
-
-def init_db():
-    db.create_all()
 
 # --- Base Template ---
 BASE_HTML = """<!doctype html>
@@ -90,9 +79,13 @@ def products():
     if request.method == 'POST':
         name = request.form.get('name')
         if name:
-            db.session.add(Product(name=name))
-            db.session.commit()
-            flash("Product added.")
+            try:
+                db.session.add(Product(name=name))
+                db.session.commit()
+                flash("Product added.")
+            except Exception as e:
+                db.session.rollback()
+                flash(f"Error adding product: {e}")
         return redirect(url_for('products'))
     rows = Product.query.all()
     table = "<h3>Products</h3><ul>" + "".join(f"<li>{p.name}</li>" for p in rows) + "</ul>"
@@ -166,7 +159,7 @@ def report():
     rows = f"<h3>Report for {year}</h3><table class='table'><tr><th>Product</th><th>Stock</th><th>Total Sales</th><th>Remaining</th></tr>"
     for p in products:
         stock_qty = stocks.get(p.id,0)
-        sold = sales_totals.get(p.id,0)
+        sold = sales_totals.get(p.id,0) or 0
         remaining = stock_qty - sold
         rows += f"<tr><td>{p.name}</td><td>{stock_qty}</td><td>{sold}</td><td>{remaining}</td></tr>"
     rows += "</table><a href='" + url_for('export_excel') + "' class='btn btn-success'>Export to Excel</a>"
@@ -184,7 +177,7 @@ def export_excel():
     data = []
     for p in products:
         stock_qty = stocks.get(p.id,0)
-        sold = sales_totals.get(p.id,0)
+        sold = sales_totals.get(p.id,0) or 0
         remaining = stock_qty - sold
         data.append({"Product": p.name, "Stock": stock_qty, "Total Sales": sold, "Remaining": remaining})
     df = pd.DataFrame(data)
@@ -192,15 +185,15 @@ def export_excel():
     with pd.ExcelWriter(output, engine='openpyxl') as writer:
         df.to_excel(writer, index=False)
     output.seek(0)
-    return send_file(output, as_attachment=True, download_name=f"report_{year}.xlsx", mimetype='application/vnd.openxmlformats-officedocument.spreadsheetml.sheet")
+    return send_file(output, as_attachment=True, download_name=f"report_{year}.xlsx", mimetype='application/vnd.openxmlformats-officedocument.spreadsheetml.sheet')
 
 # --- Ensure DB exists & seed products ---
-if not os.path.exists('sales_stock.db'):
-    init_db()
-    sample = ['Product A', 'Product B', 'Product C', 'Product D']
-    for s in sample:
-        db.session.add(Product(name=s))
-    db.session.commit()
+with app.app_context():
+    db.create_all()
+    if Product.query.count() == 0:
+        for name in ['Product A', 'Product B', 'Product C', 'Product D']:
+            db.session.add(Product(name=name))
+        db.session.commit()
 
 if __name__ == '__main__':
-    app.run(debug=True)
+    app.run(host='0.0.0.0', port=5000)
