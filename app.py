@@ -1,160 +1,178 @@
-from flask import Flask, request, redirect, url_for, render_template_string, flash, send_file
-from flask_sqlalchemy import SQLAlchemy
-from datetime import datetime
-import pandas as pd
-import os
-import random
+from flask import Flask, render_template_string, request, redirect, url_for
+import sqlite3
+import calendar
 
 app = Flask(__name__)
-app.secret_key = "supersecretkey"
-app.config['SQLALCHEMY_DATABASE_URI'] = 'sqlite:///sales_stock.db'
-db = SQLAlchemy(app)
 
-# Database Models
-class Product(db.Model):
-    id = db.Column(db.Integer, primary_key=True)
-    name = db.Column(db.String(100), nullable=False)
-    stock = db.Column(db.Float, nullable=True)
+# --- Database setup ---
+DB_FILE = "sales.db"
+PRODUCTS = ["Bikes", "Scooters", "Harleys", "ATV's", "PWC's", "Boats", "Snowmobiles"]
+MONTHS = list(calendar.month_name)[1:]
 
-class Sales(db.Model):
-    id = db.Column(db.Integer, primary_key=True)
-    year = db.Column(db.Integer, nullable=False)
-    month = db.Column(db.Integer, nullable=False)
-    product_id = db.Column(db.Integer, db.ForeignKey('product.id'), nullable=False)
-    quantity = db.Column(db.Float, nullable=False)
-    product = db.relationship('Product')
+conn = sqlite3.connect(DB_FILE, check_same_thread=False)
+c = conn.cursor()
+c.execute("""
+CREATE TABLE IF NOT EXISTS sales (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    month TEXT,
+    product TEXT,
+    stock INTEGER,
+    sales INTEGER
+)
+""")
+conn.commit()
 
-# Initialize DB
-with app.app_context():
-    db.create_all()
-    if not Product.query.first():
-        db.session.add_all([
-            Product(name="Product A"),
-            Product(name="Product B"),
-            Product(name="Product C"),
-        ])
-        db.session.commit()
-
-# ===== TEMP: Seed last 7 months random sales =====
-with app.app_context():
-    year = datetime.now().year
-    products = Product.query.all()
-    current_month = datetime.now().month
-    for m in range(current_month-7, current_month):
-        if m >= 1:
-            for p in products:
-                exists = Sales.query.filter_by(year=year, month=m, product_id=p.id).first()
-                if not exists:
-                    qty = random.randint(5, 50)
-                    db.session.add(Sales(year=year, month=m, product_id=p.id, quantity=qty))
-    db.session.commit()
-# ===== END TEMP =====
-
-# HTML Base Template
-BASE = """
-<!doctype html>
-<html>
-<head>
-    <title>Sales & Stock App</title>
-    <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/bootstrap@5.3.0/dist/css/bootstrap.min.css">
-</head>
-<body class="p-4">
-<div class="container">
-    <h1>Sales & Stock App</h1>
-    <nav>
-        <a href="{{ url_for('sales') }}" class="btn btn-primary btn-sm">Sales Entry</a>
-        <a href="{{ url_for('stock') }}" class="btn btn-secondary btn-sm">Stock Entry</a>
-        <a href="{{ url_for('report') }}" class="btn btn-info btn-sm">Report</a>
-    </nav>
-    <hr>
-    {% with messages = get_flashed_messages() %}
-      {% if messages %}
-        <div class="alert alert-success">{{ messages[0] }}</div>
-      {% endif %}
-    {% endwith %}
-    {{ content|safe }}
-</div>
-</body>
-</html>
-"""
-
+# --- Home ---
 @app.route("/")
 def home():
-    return redirect(url_for("sales"))
+    return render_template_string("""
+        <h1>Sales Entry</h1>
+        <ul>
+            {% for m in months %}
+                <li><a href="{{ url_for('enter_sales', month=m) }}">{{ m }}</a></li>
+            {% endfor %}
+        </ul>
+        <a href="{{ url_for('report') }}">📊 View Report</a>
+    """, months=MONTHS)
 
-@app.route("/stock", methods=["GET","POST"])
-def stock():
-    products = Product.query.all()
-    if request.method == "POST":
-        for p in products:
-            val = request.form.get(str(p.id))
-            if val:
-                p.stock = float(val)
-        db.session.commit()
-        flash("Stock updated successfully.")
-        return redirect(url_for("stock"))
+# --- Sales entry ---
+@app.route("/enter/<month>", methods=["GET", "POST"])
+def enter_sales(month):
+    # find month index
+    month_index = MONTHS.index(month)
 
-    form_html = "<form method='post'><table class='table'><tr><th>Product</th><th>Stock</th></tr>"
-    for p in products:
-        val = p.stock if p.stock is not None else ""
-        form_html += f"<tr><td>{p.name}</td><td><input name='{p.id}' value='{val}'></td></tr>"
-    form_html += "</table><button class='btn btn-success'>Save</button></form>"
-    return render_template_string(BASE, content=form_html)
+    # find current max entered month
+    c.execute("SELECT DISTINCT month FROM sales")
+    entered_months = [row[0] for row in c.fetchall()]
+    entered_index = [MONTHS.index(m) for m in entered_months] if entered_months else []
 
-@app.route("/sales", methods=["GET","POST"])
-def sales():
-    year = datetime.now().year
-    month = datetime.now().month
-    products = Product.query.all()
-    existing = {s.product_id: s.quantity for s in Sales.query.filter_by(year=year, month=month).all()}
+    is_readonly = (month_index < max(entered_index, default=-1))
 
-    if request.method == "POST":
-        for p in products:
-            qty = request.form.get(str(p.id))
-            if qty:
-                if p.id in existing:
-                    rec = Sales.query.filter_by(year=year, month=month, product_id=p.id).first()
-                    rec.quantity = float(qty)
-                else:
-                    db.session.add(Sales(year=year, month=month, product_id=p.id, quantity=float(qty)))
-        db.session.commit()
-        flash("Sales saved.")
-        return redirect(url_for("sales"))
+    if request.method == "POST" and not is_readonly:
+        for p in PRODUCTS:
+            stock = request.form.get(f"stock_{p}")
+            sales = request.form.get(f"sales_{p}")
 
-    # Editable form for current month
-    form_html = f"<form method='post'><h3>{year} - {month}</h3><table class='table'>"
-    for p in products:
-        val = existing.get(p.id, "")
-        form_html += f"<tr><td>{p.name}</td><td><input name='{p.id}' value='{val}'></td></tr>"
-    form_html += "</table><button class='btn btn-success'>Save</button></form>"
+            # Stock only for January
+            stock_val = int(stock) if (stock and month == "January") else None
+            sales_val = int(sales) if sales else 0
 
-    # Read-only previous months in current year
-    prev_months = Sales.query.filter(Sales.year == year, Sales.month < month).order_by(Sales.month).all()
-    if prev_months:
-        month_data = {}
-        for s in prev_months:
-            month_data.setdefault(s.month, {})[s.product_id] = s.quantity
+            # check if exists
+            c.execute("SELECT id FROM sales WHERE month=? AND product=?", (month, p))
+            row = c.fetchone()
+            if row:
+                c.execute("UPDATE sales SET stock=?, sales=? WHERE id=?", (stock_val, sales_val, row[0]))
+            else:
+                c.execute("INSERT INTO sales (month, product, stock, sales) VALUES (?,?,?,?)",
+                          (month, p, stock_val, sales_val))
+        conn.commit()
+        return redirect(url_for('home'))
 
-        table_html = "<h3>Previous Months</h3>"
-        for m in sorted(month_data.keys()):
-            table_html += f"<h5>{year} - {m}</h5><table class='table'>"
-            for p in products:
-                qty = month_data[m].get(p.id, "")
-                table_html += f"<tr><td>{p.name}</td><td>{qty}</td></tr>"
-            table_html += "</table>"
-    else:
-        table_html = "<p>No previous month data.</p>"
+    # fetch data
+    c.execute("SELECT product, stock, sales FROM sales WHERE month=?", (month,))
+    rows = {r[0]: (r[1], r[2]) for r in c.fetchall()}
 
-    return render_template_string(BASE, content=form_html + "<hr>" + table_html)
+    return render_template_string("""
+        <h2>Enter Sales for {{ month }}</h2>
+        <form method="post">
+            <table border="1" cellpadding="5">
+                <tr><th>Product</th>{% if month=='January' %}<th>Stock</th>{% endif %}<th>Sales</th></tr>
+                {% for p in products %}
+                <tr>
+                    <td>{{ p }}</td>
+                    {% if month=='January' %}
+                        <td><input type="number" name="stock_{{p}}" value="{{ rows.get(p,(None,None))[0] or '' }}" {% if readonly %}readonly{% endif %}></td>
+                    {% endif %}
+                    <td><input type="number" name="sales_{{p}}" value="{{ rows.get(p,(None,None))[1] or '' }}" {% if readonly %}readonly{% endif %}></td>
+                </tr>
+                {% endfor %}
+            </table>
+            {% if not readonly %}<button type="submit">Save</button>{% endif %}
+        </form>
+        <a href="/">⬅ Back</a>
+    """, month=month, products=PRODUCTS, rows=rows, readonly=is_readonly)
 
+# --- Report ---
 @app.route("/report")
 def report():
-    sales = Sales.query.all()
-    data = [{"Year": s.year, "Month": s.month, "Product": s.product.name, "Quantity": s.quantity} for s in sales]
-    df = pd.DataFrame(data)
-    csv_path = "report.xlsx"
-    df.to_excel(csv_path, index=False)
-    return send_file(csv_path, as_attachment=True)
+    # fetch all
+    c.execute("SELECT month, product, COALESCE(stock,0), sales FROM sales")
+    data = c.fetchall()
+
+    # reshape
+    sales_data = {m: {p:0 for p in PRODUCTS} for m in MONTHS}
+    for m,p,stock,sales in data:
+        sales_data[m][p] = sales
+
+    totals = {p: sum(sales_data[m][p] for m in MONTHS) for p in PRODUCTS}
+    grand_total = sum(totals.values())
+
+    apus = {p: (totals[p]/12 if totals[p]>0 else 0) for p in PRODUCTS}
+    percents = {p: (totals[p]/grand_total*100 if grand_total>0 else 0) for p in PRODUCTS}
+
+    return render_template_string("""
+        <h1>📊 Sales Report</h1>
+
+        <div style="display:flex; gap:20px;">
+            <div style="flex:1;">
+                <h3>Monthly Sales Trend</h3>
+                <canvas id="lineChart"></canvas>
+            </div>
+            <div style="flex:1;">
+                <h3>% Contribution by Product</h3>
+                <canvas id="barChart"></canvas>
+            </div>
+        </div>
+
+        <h3>Totals</h3>
+        <table border="1" cellpadding="5">
+            <tr><th>Product</th><th>Total</th><th>APUS</th><th>% of Sales</th></tr>
+            {% for p in products %}
+            <tr>
+                <td>{{ p }}</td>
+                <td>{{ totals[p] }}</td>
+                <td>{{ '%.2f' % apus[p] }}</td>
+                <td>{{ '%.1f' % percents[p] }}%</td>
+            </tr>
+            {% endfor %}
+        </table>
+
+        <a href="/">⬅ Back</a>
+
+        <script src="https://cdn.jsdelivr.net/npm/chart.js"></script>
+        <script>
+        const lineCtx = document.getElementById('lineChart').getContext('2d');
+        new Chart(lineCtx, {
+            type: 'line',
+            data: {
+                labels: {{ months|tojson }},
+                datasets: [
+                    {% for p in products %}
+                    {
+                        label: '{{p}}',
+                        data: {{ [sales_data[m][p] for m in months]|tojson }},
+                        fill: false,
+                        borderWidth: 2
+                    },
+                    {% endfor %}
+                ]
+            }
+        });
+
+        const barCtx = document.getElementById('barChart').getContext('2d');
+        new Chart(barCtx, {
+            type: 'bar',
+            data: {
+                labels: {{ products|tojson }},
+                datasets: [{
+                    label: '% of Sales',
+                    data: {{ [percents[p] for p in products]|tojson }},
+                    backgroundColor: 'rgba(75,192,192,0.6)'
+                }]
+            }
+        });
+        </script>
+    """, products=PRODUCTS, months=MONTHS, sales_data=sales_data, totals=totals, apus=apus, percents=percents)
 
 if __name__ == "__main__":
-    app.run(host="0.0.0.0", port=5000)
+    app.run(debug=True)
